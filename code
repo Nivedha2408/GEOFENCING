@@ -1,0 +1,155 @@
+#include <SoftwareSerial.h>
+#include <ESP8266WiFi.h>
+#include <TinyGPS++.h>
+
+// Initialize GPS and GSM modules
+TinyGPSPlus gps;
+SoftwareSerial SerialGPS(4, 5); // RX = GPIO4 (D2), TX = GPIO5 (D1)
+SoftwareSerial GSM(2, 3);      // RX = GPIO2, TX = GPIO3
+
+// Wi-Fi credentials
+const char* ssid = ".....";    //give wifi id
+const char* password = ".....";  //give wifi password
+const float centreLat = 11.021466; // Replace with boundary latitude
+const float centreLon = 76.935188; // Replace with boundary longitude
+const float boundaryRadius = 3.0;
+float Latitude, Longitude;
+int year, month, date, hour, minute, second;
+String DateString, TimeString, LatitudeString, LongitudeString;
+
+// Create a Wi-Fi server on port 80
+WiFiServer server(80);
+
+bool alertSent = false; // Flag to track if an alert has been sent
+
+void setup() {
+  Serial.begin(115200);         // Debugging
+  SerialGPS.begin(9600);        // Initialize GPS
+  GSM.begin(9600);              // Initialize GSM module
+
+  // Connect to Wi-Fi
+  Serial.println();
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  server.begin();
+  Serial.println("Server started");
+  Serial.println(WiFi.localIP());
+
+  delay(10000);
+  // Allow GSM module to initialize
+}
+
+void loop() {
+  // Fetch GPS data
+  while (SerialGPS.available() > 0) {
+    if (gps.encode(SerialGPS.read())) {
+      if (gps.location.isValid()) {
+        Latitude = gps.location.lat();
+        Longitude = gps.location.lng();
+        LatitudeString = String(Latitude, 6);
+        LongitudeString = String(Longitude, 6);
+        float distanceToBoundary = calculateDistance(Latitude, Longitude, centreLat, centreLon);
+
+
+        // Check if current location is outside the boundary
+        if (distanceToBoundary > boundaryRadius && !alertSent) {
+          Serial.println("ALERT: Out of bounds!");
+          
+        Serial.print("Current Location: ");
+        Serial.print(Latitude, 6);
+        Serial.print(", ");
+        Serial.print(Longitude, 6);
+        Serial.print(" | Distance to boundary: ");
+        Serial.print(distanceToBoundary);
+        Serial.println(" meters");
+        callmsg(); 
+        alertSent = true; // Set flag to true after sending alert
+        } else if (distanceToBoundary <= boundaryRadius) {
+          alertSent = false; // Reset flag if back within the boundary
+        }
+      }
+
+      if (gps.date.isValid()) {
+        DateString = String(gps.date.day()) + "/" + String(gps.date.month()) + "/" + String(gps.date.year());
+      }
+
+      if (gps.time.isValid()) {
+        hour = gps.time.hour() + 5; // Adjust for timezone if needed
+        if (hour >= 24) hour -= 24; // Wrap around if exceeding 24 hours
+        minute = gps.time.minute();
+        second = gps.time.second();
+        TimeString = String(hour) + ":" + (minute < 10 ? "0" : "") + String(minute) + ":" + (second < 10 ? "0" : "") + String(second);
+      }
+    }
+  }
+
+  // Serve GPS data over Wi-Fi
+  WiFiClient client = server.available();
+  if (client) {
+    String s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    s += "<!DOCTYPE html><html><head><title>NEO-6M GPS Readings</title><style>"; 
+    s += "table, th, td {border: 1px solid blue;} </style></head><body>";
+    s += "<h1 style='font-size:300%; text-align:center;'>NEO-6M GPS Readings</h1>";
+    s += "<p style='text-align:center; font-size:150%;'><b>Location Details</b></p>";
+    s += "<table style='margin:auto; width:50%;'><tr><th>Latitude</th><td style='text-align:center;'>" + LatitudeString + "</td></tr>";
+    s += "<tr><th>Longitude</th><td style='text-align:center;'>" + LongitudeString + "</td></tr>";
+    s += "<tr><th>Date</th><td style='text-align:center;'>" + DateString + "</td></tr>";
+    s += "<tr><th>Time</th><td style='text-align:center;'>" + TimeString + "</td></tr></table>";
+
+    if (gps.location.isValid()) {
+      s += "<p style='text-align:center;'><a style='color:red; font-size:125%;' href='http://maps.google.com/maps?&z=15&mrt=yp&t=k&q=";
+      s += LatitudeString + "+" + LongitudeString + "' target='_top'>Click here</a> to open the location in Google Maps.</p>";
+    }
+
+    s += "</body></html>";
+    client.print(s);
+    delay(100); 
+  }
+}
+
+void callmsg() {
+  if (gps.location.isValid()) {
+    GSM.println("AT+CMGF=1"); // Set SMS text mode
+    delay(1000);
+
+    GSM.print("AT+CMGS=\"+91xxxxxxxxxx\"\r"); // Replace with recipient's phone number
+    delay(1000);
+
+    String message = "GPS Location:\n";
+    message += "Latitude: " + LatitudeString + "\n";
+    message += "Longitude: " + LongitudeString + "\n";
+    message += "Date: " + DateString + "\n";
+    message += "Time: " + TimeString;
+    GSM.println("Alert! Person is going out of boundary");
+    GSM.println("Person's Current Location ");
+    GSM.println("http://maps.google.com/maps?&z=15&mrt=yp&t=k&q=" + LatitudeString + "," + LongitudeString);
+    GSM.println((char)26);
+    delay(10000);
+
+    GSM.write(26); // Ctrl+Z to send the message
+    delay(5000);
+    GSM.println("ATD+919840053669;"); // Replace with the recipient's number
+    delay(100000);
+    GSM.println("ATH");
+  }
+}
+
+float calculateDistance(float lat1, float lon1, float lat2, float lon2) {
+  const float R = 6371e3; // Earth radius in meters
+  float phi1 = radians(lat1);
+  float phi2 = radians(lat2);
+  float deltaPhi = radians(lat2 - lat1);
+  float deltaLambda = radians(lon2 - lon1);
+
+  float a = sin(deltaPhi / 2) * sin(deltaPhi / 2) +
+            cos(phi1) * cos(phi2) *
+            sin(deltaLambda / 2) * sin(deltaLambda / 2);
+  float c = 2 * atan2(sqrt(a), sqrt(1 - a));
+
+  return R * c; // Distance in meters
+}
